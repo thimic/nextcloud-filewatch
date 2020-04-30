@@ -21,7 +21,18 @@ RUN addgroup -g $USER_GID $USER && adduser -G $USER -D -u $USER_UID $USER
 RUN apk update && apk add nextcloud-client && rm -rf /etc/apk/cache
 
 # install fswatch
-RUN apk add --no-cache file git autoconf automake libtool gettext gettext-dev make g++ texinfo curl
+RUN apk add --no-cache \
+    file \
+    git \
+    autoconf \
+    automake \
+    libtool \
+    gettext \
+    gettext-dev \
+    make \
+    g++ \
+    texinfo \
+    curl
 
 ENV ROOT_HOME /root
 ENV FSWATCH_BRANCH master
@@ -31,7 +42,7 @@ RUN git clone https://github.com/emcrisostomo/fswatch.git
 
 WORKDIR ${ROOT_HOME}/fswatch
 RUN git checkout ${FSWATCH_BRANCH}
-RUN ./autogen.sh && ./configure && make && make install
+RUN ./autogen.sh && ./configure && make && make install && rm -rf ../fswatch
 
 # add run script
 WORKDIR /usr/src/nextcloud_filewatch
