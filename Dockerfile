@@ -35,7 +35,7 @@ RUN apk add --no-cache \
     curl
 
 ENV ROOT_HOME /root
-ENV FSWATCH_BRANCH master
+ENV FSWATCH_BRANCH 1.14.0
 
 WORKDIR ${ROOT_HOME}
 RUN git clone https://github.com/emcrisostomo/fswatch.git
