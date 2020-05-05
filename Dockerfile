@@ -32,7 +32,8 @@ RUN apk add --no-cache \
     make \
     g++ \
     texinfo \
-    curl
+    curl \
+    linux-headers
 
 ENV ROOT_HOME /root
 ENV FSWATCH_BRANCH 1.14.0

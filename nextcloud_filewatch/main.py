@@ -4,6 +4,7 @@
 import asyncclick as click
 import asyncio
 import logging
+import psutil
 import sys
 
 from enum import Enum
@@ -38,6 +39,27 @@ LOGGER = set_up_logger('ncwatch')
 POLL = 'poll'
 
 
+def has_handle(file_path: str) -> bool:
+    """
+    Check if a file is open in another process.
+
+    Args:
+        file_path: File path to check
+
+    Returns:
+        True if file is open, else False
+
+    """
+    for proc in psutil.process_iter():
+        try:
+            for item in proc.open_files():
+                if file_path == item.path:
+                    return True
+        except Exception:
+            LOGGER.exception('Error while checking file handle:')
+    return False
+
+
 class Events(Enum):
     """
     Events emitted by fswatch to pay attention to.
@@ -69,6 +91,7 @@ class Watcher:
         self._watchers = set()
         self._process: Optional[asyncio.subprocess.Process] = None
         self._queue = queue
+        self._cancelled = False
 
     async def _read_stream(self, stream: asyncio.streams.StreamReader):
         """
@@ -81,25 +104,26 @@ class Watcher:
         """
         while True:
             line = await stream.readline()
+            if self._queue.full():
+                continue
             line = line.decode().strip('\n')
             if not line.strip():
                 continue
-            if self._queue.full():
-                continue
+
             await self._queue.put(line)
 
-    async def start(self, consumer: Callable, recursive: bool = False,
+    async def start(self, recursive: bool = False,
                     batch: bool = False, exclude: Optional[List[str]] = None):
         """
         Start file watcher.
 
         Args:
-            consumer: Function consuming watch events
             recursive: Also watch sub directories of the given directory
             batch: Batch concurrent fswatch events together
             exclude: Exclude files matching any of the following regexes
 
         """
+        self._cancelled = False
         args = list(self._watchers)
         exclude = exclude or []
 
@@ -123,23 +147,29 @@ class Watcher:
         if batch:
             args.insert(0, '-o')
 
-        self._process = await asyncio.create_subprocess_exec(
-            'fswatch',
-            *args,
-            stdout=asyncio.subprocess.PIPE
-        )
-
-        LOGGER.info('Listening...')
-        LOGGER.debug(f'fswatch {" ".join(args)}')
-        await asyncio.gather(
-            consumer(),
-            self._read_stream(self._process.stdout),
-        )
+        while not self._cancelled:
+            self._process = await asyncio.create_subprocess_exec(
+                'fswatch',
+                *args,
+                stdout=asyncio.subprocess.PIPE
+            )
+            LOGGER.info('Listening...')
+            LOGGER.debug(f'fswatch {" ".join(args)}')
+            await asyncio.gather(
+                self._read_stream(self._process.stdout),
+            )
+            stdout, stderr = await self._process.communicate()
+            if self._process.returncode:
+                LOGGER.critical(stderr.decode().strip())
+                LOGGER.info('Restarting fswatch...')
+            else:
+                return
 
     async def stop(self):
         """
         Stop file watcher.
         """
+        self._cancelled = True
         if self._process is None:
             return
         await self._process.terminate()
@@ -189,6 +219,14 @@ class NextcloudSync:
         self._sourcedir = sourcedir
         self._nextcloudurl = nextcloudurl
         self._queue = queue
+        self._files = {}
+        self._cancelled = False
+
+    def stop(self):
+        """
+        Stop Sync manager.
+        """
+        self._cancelled = True
 
     async def poll(self, interval: int):
         """
@@ -199,7 +237,8 @@ class NextcloudSync:
             interval: Poll interval in seconds
 
         """
-        while True:
+        self._cancelled = False
+        while not self._cancelled:
             await asyncio.sleep(interval)
             if self._queue.full():
                 continue
@@ -209,12 +248,18 @@ class NextcloudSync:
         """
         Trigger Nextcloud sync when new items are added to the given task queue.
         """
-        while True:
+        while not self._cancelled:
             line = await self._queue.get()
             if line == POLL:
                 LOGGER.info('Polling server')
             else:
                 LOGGER.info('File system change detected, starting sync')
+            LOGGER.info(f'Change: {line}')
+
+            if line != POLL:
+                while has_handle(line):
+                    LOGGER.info(f'File {line!r} is in use, waiting...')
+                    await asyncio.sleep(1)
 
             process = await asyncio.create_subprocess_exec(
                 'nextcloudcmd',
@@ -227,7 +272,7 @@ class NextcloudSync:
             if process.returncode:
                 LOGGER.critical(stderr.decode().strip())
             else:
-                LOGGER.info('Done!')
+                LOGGER.info(f'Done: {line}')
 
 
 @click.command()
@@ -268,14 +313,14 @@ async def main(sourcedir: str, nextcloudurl: str, recursive: bool,
     watcher.watch(sourcedir)
     await asyncio.gather(
         watcher.start(
-            consumer=syncer.consume,
             recursive=recursive,
             batch=False,
             exclude=[r'\._sync_[a-zA-Z0-9]+\.db']
         ),
         syncer.poll(
             interval=poll_interval
-        )
+        ),
+        syncer.consume()
     )
 
 
